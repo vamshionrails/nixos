@@ -3,6 +3,10 @@
 # Specify the NVMe device
 NVME_DEVICE="/dev/nvme0n1"
 
+# Forcefully format the partitions
+mkfs.fat -F 32 -f ${NVME_DEVICE}p1     # Forcefully format EFI partition as FAT32
+mkfs.btrfs -L nixos -f ${NVME_DEVICE}p2 # Forcefully format root partition as Btrfs
+
 # Delete existing partitions
 parted $NVME_DEVICE rm 1 2 &>/dev/null
 
