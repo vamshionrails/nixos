@@ -1,56 +1,31 @@
-#!/bin/sh
+#!/bin/bash
 
-set -eux
+# Specify the NVMe device
+NVME_DEVICE="/dev/nvme0n1"
 
-# The size of the boot partition.
-BOOT_LABEL=boot
-MAIN_LABEL=nixos
+# Delete existing partitions
+parted $NVME_DEVICE rm 1 2 &>/dev/null
 
-# Partition using gpt as required by UEFI.
-sudo -i parted $INSTALL_DRIVE_NAME -- mklabel gpt
-# Boot partition
-sudo -i parted $INSTALL_DRIVE_NAME -- mkpart ESP fat32 1MiB 512MiB
-# Primary partition
-sudo -i parted $INSTALL_DRIVE_NAME -- mkpart primary 512MiB 100%
-# Enable the boot partition.
-sudo -i parted $INSTALL_DRIVE_NAME -- set 1 boot on
+# Partition the NVMe drive
+parted $NVME_DEVICE mklabel gpt
+parted $NVME_DEVICE mkpart primary 1MiB 512MiB    # EFI partition
+parted $NVME_DEVICE mkpart primary 512MiB 100%    # Root partition
 
-# Wait for disk labels to be ready.
-sleep 4
+# Format the partitions
+mkfs.fat -F 32 ${NVME_DEVICE}p1     # Format EFI partition as FAT32
+mkfs.btrfs -L nixos ${NVME_DEVICE}p2 # Format root partition as Btrfs
 
-# Setup encryption on the primary partition.
-sudo sh -c "echo $INSTALL_DRIVE_PASSWORD | cryptsetup luksFormat /dev/disk/by-partlabel/primary"
-# Mount a decrypted version of the encrypted primary partition.
-sudo sh -c "echo $INSTALL_DRIVE_PASSWORD | cryptsetup luksOpen /dev/disk/by-partlabel/primary $MAIN_LABEL-decrypted"
+# Mount the root partition
+mount ${NVME_DEVICE}p2 /mnt
 
-# Format the boot partition.
-sudo -i mkfs.fat -F 32 -n $BOOT_LABEL /dev/disk/by-partlabel/ESP
-# Format the primary partition.
-sudo -i mkfs.btrfs -L $MAIN_LABEL /dev/mapper/$MAIN_LABEL-decrypted
+# Create subvolumes for Btrfs
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
 
-# Wait for disk labels to be ready.
-sleep 4
+# Unmount the root partition
+umount /mnt
 
-# Create btrfs subvolumes
-sudo -i mkdir -p /mnt
-sudo -i mount /dev/disk/by-label/$MAIN_LABEL /mnt
-sudo -i btrfs subvolume create /mnt/root
-sudo -i btrfs subvolume create /mnt/home
-sudo -i btrfs subvolume create /mnt/nix
-sudo -i btrfs subvolume create /mnt/swap
-sudo -i umount /mnt
-
-# Mount the main & boot partitions.
-sudo -i mount -o compress=zstd,subvol=root /dev/disk/by-label/$MAIN_LABEL /mnt
-sudo -i mkdir /mnt/{home,nix,swap}
-sudo -i mount -o compress=zstd,subvol=home /dev/disk/by-label/$MAIN_LABEL /mnt/home
-sudo -i mount -o compress=zstd,noatime,subvol=nix /dev/disk/by-label/$MAIN_LABEL /mnt/nix
-
-# Mount the boot partition within main for installation.
-sudo -i mkdir /mnt/boot
-sudo -i mount /dev//disk/by-label/$BOOT_LABEL /mnt/boot
-
-# Mount the swap partition within main for installation.
-sudo -i mount -o subvol=swap /dev/disk/by-label/$MAIN_LABEL /mnt/swap
-sudo -i btrfs filesystem mkswapfile --size 4g /mnt/swap/swapfile
-sudo -i swapon /mnt/swap/swapfile
+# Mount subvolumes
+mount -o subvol=@ ${NVME_DEVICE}p2 /mnt
+mkdir -p /mnt/home
+mount -o subvol=@home ${NVME_DEVICE}p2 /mnt/home
