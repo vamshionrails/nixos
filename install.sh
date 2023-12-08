@@ -1,73 +1,56 @@
-#!/run/current-system/sw/bin/bash
+#!/bin/sh
 
-# Make sure you uncomment disk you want to set NixOS on sdX(HDD) or nvme0n1(SSD) for example
-# if confused read more on
-# http://tldp.org/HOWTO/html_single/Partition/
-# To check list of avaliable disks run command:
-# lsblk
+set -eux
 
+# The size of the boot partition.
+BOOT_LABEL=boot
+MAIN_LABEL=nixos
 
-# UNCOMMENT
-#DISK_SSD="/dev/nvme0n1"
-# OR
-#DISK_HDD="/dev/sda"
-NAME_DIVIDER=""
+# Partition using gpt as required by UEFI.
+sudo -i parted $INSTALL_DRIVE_NAME -- mklabel gpt
+# Boot partition
+sudo -i parted $INSTALL_DRIVE_NAME -- mkpart ESP fat32 1MiB 512MiB
+# Primary partition
+sudo -i parted $INSTALL_DRIVE_NAME -- mkpart primary 512MiB 100%
+# Enable the boot partition.
+sudo -i parted $INSTALL_DRIVE_NAME -- set 1 boot on
 
-echo $DISK_SSD
-if [[ -n $DISK_SSD ]]; then
-    echo "Formating SSD disk to create partitions."
-    DISK=$DISK_SSD
-    NAME_DIVIDER="p"
+# Wait for disk labels to be ready.
+sleep 4
 
-elif [[ -n $DISK_HDD ]]; then
-    echo "Formating HDD disk to create partitions."
-    DISK=$DISK_HDD
+# Setup encryption on the primary partition.
+sudo sh -c "echo $INSTALL_DRIVE_PASSWORD | cryptsetup luksFormat /dev/disk/by-partlabel/primary"
+# Mount a decrypted version of the encrypted primary partition.
+sudo sh -c "echo $INSTALL_DRIVE_PASSWORD | cryptsetup luksOpen /dev/disk/by-partlabel/primary $MAIN_LABEL-decrypted"
 
-else
-    echo "Uncomment your disk according to your disk name"
-    lsblk
-    exit 1
-fi
+# Format the boot partition.
+sudo -i mkfs.fat -F 32 -n $BOOT_LABEL /dev/disk/by-partlabel/ESP
+# Format the primary partition.
+sudo -i mkfs.btrfs -L $MAIN_LABEL /dev/mapper/$MAIN_LABEL-decrypted
 
+# Wait for disk labels to be ready.
+sleep 4
 
+# Create btrfs subvolumes
+sudo -i mkdir -p /mnt
+sudo -i mount /dev/disk/by-label/$MAIN_LABEL /mnt
+sudo -i btrfs subvolume create /mnt/root
+sudo -i btrfs subvolume create /mnt/home
+sudo -i btrfs subvolume create /mnt/nix
+sudo -i btrfs subvolume create /mnt/swap
+sudo -i umount /mnt
 
-echo ""
-echo "Partitioning "
-echo "Note: You can safely ignore parted's informational message about needing to update /etc/fstab."
-sleep 0.5s
+# Mount the main & boot partitions.
+sudo -i mount -o compress=zstd,subvol=root /dev/disk/by-label/$MAIN_LABEL /mnt
+sudo -i mkdir /mnt/{home,nix,swap}
+sudo -i mount -o compress=zstd,subvol=home /dev/disk/by-label/$MAIN_LABEL /mnt/home
+sudo -i mount -o compress=zstd,noatime,subvol=nix /dev/disk/by-label/$MAIN_LABEL /mnt/nix
 
-# Create a GPT partition table. 
-parted "$DISK" -- mklabel gpt
-# Add the root partition. This will fill the disk except for the end part, where the swap will live, and the space left in front (512MiB) which will be used by the boot partition. 
-parted "$DISK" -- mkpart primary 512MiB -8GiB
-# Next, add a swap partition. The size required will vary according to needs, here a 8GiB one is created. 
-parted "$DISK" -- mkpart primary linux-swap -8GiB 100%
-# Finally, the boot partition. NixOS by default uses the ESP (EFI system partition) as its /boot partition. It uses the initially reserved 512MiB at the start of the disk. 
-parted "$DISK" -- mkpart ESP fat32 1MiB 512MiB
-parted "$DISK" -- set 3 boot on
+# Mount the boot partition within main for installation.
+sudo -i mkdir /mnt/boot
+sudo -i mount /dev//disk/by-label/$BOOT_LABEL /mnt/boot
 
-echo ""
-echo "Formatting "
-sleep 0.5s
-
-# For initialising Ext4 partitions: mkfs.ext4. It is recommended that you assign a unique symbolic label to the file system using the option -L label, since this makes the file system configuration independent from device changes. For example: 
-mkfs.ext4 -L nixos "${DISK}${NAME_DIVIDER}1"
-# For creating swap partitions: mkswap. Again it’s recommended to assign a label to the swap partition: -L label. For example: 
-mkswap -L swap "${DISK}${NAME_DIVIDER}2"
-# For creating boot partitions: mkfs.fat. Again it’s recommended to assign a label to the boot partition: -n label. For example: 
-mkfs.fat -F 32 -n boot "${DISK}${NAME_DIVIDER}3"
-
-
-echo ""
-echo "Installing "
-sleep 0.5s
-# Mount the target file system on which NixOS should be installed on /mnt, e.g. 
-mount /dev/disk/by-label/nixos /mnt
-# Mount the boot file system on /mnt/boot, e.g. 
-mkdir -p /mnt/boot
-mount /dev/disk/by-label/boot /mnt/boot
-# If your machine has a limited amount of memory, you may want to activate swap devices now (swapon device). The installer (or rather, the build actions that it may spawn) may need quite a bit of RAM, depending on your configuration. 
-swapon "${DISK}${NAME_DIVIDER}2"
-
-# The command nixos-generate-config can generate an initial configuration file for you: 
-nixos-generate-config --root /mnt
+# Mount the swap partition within main for installation.
+sudo -i mount -o subvol=swap /dev/disk/by-label/$MAIN_LABEL /mnt/swap
+sudo -i btrfs filesystem mkswapfile --size 4g /mnt/swap/swapfile
+sudo -i swapon /mnt/swap/swapfile
